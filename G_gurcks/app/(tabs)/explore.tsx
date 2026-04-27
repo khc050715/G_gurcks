@@ -1,48 +1,76 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
+import {
+  View,
+  Text,
+  TouchableOpacity,
+  ScrollView,
+  StyleSheet,
+  Dimensions,
+  Platform,
+} from "react-native";
+import AsyncStorage from "@react-native-async-storage/async-storage";
 
 // ─── Config ───────────────────────────────────────────────────────────────────
 const S    = 8;   // Board size
 const T    = 20;  // Total turns per session
-const CELL = 44;  // Cell size in px
+
+const { width: SCREEN_W } = Dimensions.get("window");
+// Cell size: fit 8 cells + gaps + padding within screen
+const CELL = Math.floor((Math.min(SCREEN_W, 420) - 48) / S - 2);
 
 // ─── Pieces ───────────────────────────────────────────────────────────────────
-// v: 0 = primary fill color, 1 = alt fill color (2 tones only)
 const PIECES = [
-  { shape: [[1]],                          v: 0 },
-  { shape: [[1, 1]],                       v: 0 },
-  { shape: [[1], [1]],                     v: 0 },
-  { shape: [[1, 1, 1]],                    v: 1 },
-  { shape: [[1], [1], [1]],               v: 1 },
-  { shape: [[1, 1], [1, 1]],              v: 0 },
-  { shape: [[1, 0], [1, 1]],              v: 0 },
-  { shape: [[0, 1], [1, 1]],              v: 1 },
-  { shape: [[1, 1], [1, 0]],              v: 1 },
-  { shape: [[1, 1], [0, 1]],              v: 0 },
-  { shape: [[1, 1, 1], [0, 1, 0]],        v: 1 },
-  { shape: [[1, 0], [1, 0], [1, 1]],      v: 0 },
-  { shape: [[0, 1], [0, 1], [1, 1]],      v: 1 },
-  { shape: [[1, 1, 1, 1]],                v: 1 },
-  { shape: [[1], [1], [1], [1]],          v: 1 },
+  { shape: [[1]],                         v: 0 },
+  { shape: [[1, 1]],                      v: 0 },
+  { shape: [[1], [1]],                    v: 0 },
+  { shape: [[1, 1, 1]],                   v: 1 },
+  { shape: [[1], [1], [1]],              v: 1 },
+  { shape: [[1, 1], [1, 1]],             v: 0 },
+  { shape: [[1, 0], [1, 1]],             v: 0 },
+  { shape: [[0, 1], [1, 1]],             v: 1 },
+  { shape: [[1, 1], [1, 0]],             v: 1 },
+  { shape: [[1, 1], [0, 1]],             v: 0 },
+  { shape: [[1, 1, 1], [0, 1, 0]],       v: 1 },
+  { shape: [[1, 0], [1, 0], [1, 1]],     v: 0 },
+  { shape: [[0, 1], [0, 1], [1, 1]],     v: 1 },
+  { shape: [[1, 1, 1, 1]],               v: 1 },
+  { shape: [[1], [1], [1], [1]],         v: 1 },
 ];
 
-// ─── Palette ──────────────────────────────────────────────────────────────────
-const C = {
-  bg:      "#080e08",
-  board:   "#0c150c",
-  empty:   "#111c11",
-  fill0:   "#3a6a3a",  // primary block color
-  fill1:   "#4d8a4d",  // alt block color
-  flash:   "#8fc98f",  // cleared-cell flash
-  preview: "#3a6a3a",  // valid placement preview
-  invalid: "#4a1a1a",  // invalid placement tint
-  text:    "#8fc98f",  // primary text
-  muted:   "#2e5c2e",  // muted text
-  dim:     "#1a3a1a",  // very dim
-  border:  "#162616",  // dividers
+// ─── Themes ───────────────────────────────────────────────────────────────────
+const THEMES = {
+  forest: {
+    name: "FOREST",
+    bg:      "#080e08",
+    board:   "#0c150c",
+    empty:   "#111c11",
+    fill0:   "#3a6a3a",
+    fill1:   "#4d8a4d",
+    flash:   "#8fc98f",
+    preview: "#3a6a3a",
+    invalid: "#4a1a1a",
+    text:    "#8fc98f",
+    muted:   "#2e5c2e",
+    dim:     "#1a3a1a",
+    border:  "#162616",
+  },
+  rams: {
+    name: "RAMS",
+    // Dieter Rams / Braun-inspired: warm off-white, charcoal, accent orange
+    bg:      "#f0ede8",
+    board:   "#e4e0d8",
+    empty:   "#d6d1c8",
+    fill0:   "#1a1a1a",
+    fill1:   "#3a3a3a",
+    flash:   "#e05a00",
+    preview: "#1a1a1a",
+    invalid: "#e05a0033",
+    text:    "#1a1a1a",
+    muted:   "#6b6560",
+    dim:     "#b0ab9f",
+    border:  "#c8c2b8",
+  },
 };
-
-const MONO = "'DM Mono', 'Courier New', monospace";
-const SANS = "'DM Sans', system-ui, sans-serif";
 
 // ─── Pure helpers ─────────────────────────────────────────────────────────────
 const emptyBoard = () =>
@@ -69,7 +97,7 @@ function place(board, piece, row, col) {
   const b = board.map((r) => [...r]);
   piece.shape.forEach((r, ri) =>
     r.forEach((cell, ci) => {
-      if (cell) b[row + ri][col + ci] = piece.v + 1; // stored as 1 or 2
+      if (cell) b[row + ri][col + ci] = piece.v + 1;
     })
   );
   return b;
@@ -93,17 +121,20 @@ function hasRoom(board, piece) {
   return false;
 }
 
-// ─── Persistence ──────────────────────────────────────────────────────────────
-function getHistory() {
+// ─── Persistence (AsyncStorage) ───────────────────────────────────────────────
+const HISTORY_KEY = "bc_history_v2";
+
+async function getHistory() {
   try {
-    return JSON.parse(localStorage.getItem("bc_history") || "[]");
+    const raw = await AsyncStorage.getItem(HISTORY_KEY);
+    return raw ? JSON.parse(raw) : [];
   } catch {
     return [];
   }
 }
 
-function saveHistory(lines) {
-  const h = getHistory();
+async function saveHistory(lines) {
+  const h = await getHistory();
   const d = today();
   const idx = h.findIndex((x) => x.d === d);
   if (idx >= 0) {
@@ -113,138 +144,130 @@ function saveHistory(lines) {
   }
   const trimmed = h.slice(0, 30);
   try {
-    localStorage.setItem("bc_history", JSON.stringify(trimmed));
+    await AsyncStorage.setItem(HISTORY_KEY, JSON.stringify(trimmed));
   } catch {}
   return trimmed;
 }
 
 // ─── MiniPiece ────────────────────────────────────────────────────────────────
-function MiniPiece({ piece, size, opacity = 1 }) {
-  const rows = piece.shape.length;
-  const cols = Math.max(...piece.shape.map((r) => r.length));
+function MiniPiece({ piece, size, opacity = 1, C }) {
   return (
-    <div
-      style={{
-        display: "grid",
-        gridTemplateColumns: `repeat(${cols}, ${size}px)`,
-        gridTemplateRows: `repeat(${rows}, ${size}px)`,
-        gap: 1,
-        opacity,
-      }}
-    >
-      {piece.shape.map((row, r) =>
-        row.map((cell, c) => (
-          <div
-            key={`${r}-${c}`}
-            style={{
-              width: size,
-              height: size,
-              borderRadius: 1,
-              background: cell ? (piece.v ? C.fill1 : C.fill0) : "transparent",
-            }}
-          />
-        ))
-      )}
-    </div>
+    <View style={{ opacity, flexDirection: "column" }}>
+      {piece.shape.map((row, r) => (
+        <View key={r} style={{ flexDirection: "row" }}>
+          {row.map((cell, c) => (
+            <View
+              key={c}
+              style={{
+                width: size,
+                height: size,
+                borderRadius: 1,
+                margin: 0.5,
+                backgroundColor: cell
+                  ? piece.v ? C.fill1 : C.fill0
+                  : "transparent",
+              }}
+            />
+          ))}
+        </View>
+      ))}
+    </View>
   );
 }
 
 // ─── HistoryBar ───────────────────────────────────────────────────────────────
-function HistoryBar({ history, large = false }) {
+function HistoryBar({ history, large = false, C }) {
   const items = [...history].slice(0, 7).reverse();
   if (!items.length) return null;
-  const maxL = Math.max(...items.map((h) => h.l), 1);
-  const maxH = large ? 48 : 24;
-  const barW = large ? 20 : 8;
+  const maxL  = Math.max(...items.map((h) => h.l), 1);
+  const maxH  = large ? 48 : 24;
+  const barW  = large ? 20 : 8;
   const todayStr = today();
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 6 }}>
-      <div style={{ display: "flex", gap: large ? 8 : 4, alignItems: "flex-end", height: maxH }}>
+    <View style={{ alignItems: "center", gap: 6 }}>
+      <View style={{ flexDirection: "row", alignItems: "flex-end", height: maxH, gap: large ? 8 : 4 }}>
         {items.map((h, i) => {
           const isToday = h.d === todayStr;
           const barH = Math.max(Math.round((h.l / maxL) * maxH), 2);
           return (
-            <div key={i} style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 3 }}>
-              <div
+            <View key={i} style={{ alignItems: "center", gap: 3 }}>
+              <View
                 style={{
                   width: barW,
                   height: barH,
-                  background: isToday ? C.fill1 : C.dim,
+                  backgroundColor: isToday ? C.fill1 : C.dim,
                   borderRadius: 1,
                 }}
               />
               {large && (
-                <div
-                  style={{
-                    fontFamily: MONO,
-                    fontSize: 9,
-                    color: isToday ? C.muted : C.dim,
-                  }}
-                >
+                <Text style={{ fontSize: 9, color: isToday ? C.muted : C.dim, fontFamily: Platform.OS === "ios" ? "Courier New" : "monospace" }}>
                   {h.l}
-                </div>
+                </Text>
               )}
-            </div>
+            </View>
           );
         })}
-      </div>
+      </View>
       {large && (
-        <div
-          style={{
-            fontFamily: MONO,
-            fontSize: 9,
-            color: C.dim,
-            letterSpacing: 2,
-            textTransform: "uppercase",
-          }}
-        >
-          past sessions
-        </div>
+        <Text style={{ fontSize: 9, color: C.dim, letterSpacing: 2, fontFamily: Platform.OS === "ios" ? "Courier New" : "monospace" }}>
+          PAST SESSIONS
+        </Text>
       )}
-    </div>
+    </View>
   );
 }
 
 // ─── Main Component ───────────────────────────────────────────────────────────
 export default function BlockChallenge() {
-  const [board,   setBoard]   = useState(emptyBoard);
-  const [queue,   setQueue]   = useState(makeQueue);
-  const [turn,    setTurn]    = useState(0);
-  const [lines,   setLines]   = useState(0);
-  const [phase,   setPhase]   = useState("playing"); // 'playing' | 'ended'
-  const [hover,   setHover]   = useState(null);      // { r, c }
-  const [flash,   setFlash]   = useState(new Set());
-  const [history, setHistory] = useState(getHistory);
+  const [board,     setBoard]     = useState(emptyBoard);
+  const [queue,     setQueue]     = useState(makeQueue);
+  const [turn,      setTurn]      = useState(0);
+  const [lines,     setLines]     = useState(0);
+  const [phase,     setPhase]     = useState("playing");
+  const [selected,  setSelected]  = useState(null); // unused, kept for overlay sets
+  const [flash,     setFlash]     = useState(new Set());
+  const [history,   setHistory]   = useState([]);
+  const [themeKey,  setThemeKey]  = useState("forest");
 
-  // Ref to avoid stale closure in useEffect
+  const C = THEMES[themeKey];
+  const MONO = Platform.OS === "ios" ? "Courier New" : "monospace";
+
   const linesRef = useRef(0);
   useEffect(() => { linesRef.current = lines; }, [lines]);
+
+  // Load history on mount
+  useEffect(() => {
+    getHistory().then(setHistory);
+  }, []);
 
   const current  = turn < T ? queue[turn] : null;
   const upcoming = queue.slice(turn + 1, turn + 4);
 
-  // Auto-end if current piece has no valid position on the board
+  // Auto-end if no room
   useEffect(() => {
     if (phase === "playing" && current && !hasRoom(board, current)) {
       finish(linesRef.current);
     }
-  }, [turn, board]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [turn, board]); // eslint-disable-line
 
-  function finish(finalLines) {
-    const h = saveHistory(finalLines);
+  async function finish(finalLines) {
+    const h = await saveHistory(finalLines);
     setHistory(h);
     setPhase("ended");
   }
 
-  function handleClick(r, c) {
+  function handleCellPress(r, c) {
     if (phase !== "playing" || !current) return;
     if (!canPlace(board, current, r, c)) return;
+    doPlace(r, c);
+  }
 
+  function doPlace(r, c) {
+    if (!current) return;
     const placed = place(board, current, r, c);
     const { board: cleared, lines: newL } = clearLines(placed);
 
-    // Collect flash cells (cells that were cleared)
     const f = new Set();
     for (let rr = 0; rr < S; rr++)
       for (let cc = 0; cc < S; cc++)
@@ -261,11 +284,9 @@ export default function BlockChallenge() {
     setBoard(cleared);
     setLines(totalLines);
     setTurn(nextTurn);
-    setHover(null);
+    setSelected(null);
 
-    if (nextTurn >= T) {
-      finish(totalLines);
-    }
+    if (nextTurn >= T) finish(totalLines);
   }
 
   function restart() {
@@ -274,296 +295,282 @@ export default function BlockChallenge() {
     setTurn(0);
     setLines(0);
     setPhase("playing");
-    setHover(null);
+    setSelected(null);
     setFlash(new Set());
   }
 
-  // Build preview / invalid overlay sets
+  function toggleTheme() {
+    setThemeKey((k) => (k === "forest" ? "rams" : "forest"));
+  }
+
+  // Build preview / invalid sets
   const previewSet = new Set();
   const invalidSet = new Set();
-  if (hover && current && phase === "playing") {
-    const ok = canPlace(board, current, hover.r, hover.c);
+  if (selected && current && phase === "playing") {
+    const ok = canPlace(board, current, selected.r, selected.c);
     current.shape.forEach((row, ri) =>
       row.forEach((cell, ci) => {
         if (cell) {
-          const k = `${hover.r + ri}-${hover.c + ci}`;
+          const k = `${selected.r + ri}-${selected.c + ci}`;
           ok ? previewSet.add(k) : invalidSet.add(k);
         }
       })
     );
   }
 
-  const boardW = S * CELL + (S - 1) * 2 + 16; // board pixel width
+  const boardPx = CELL * S + 2 * (S - 1) + 16;
 
   return (
-    <div
-      style={{
-        background: C.bg,
-        minHeight: "100vh",
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-        fontFamily: SANS,
-        padding: "24px 16px",
-      }}
+    <ScrollView
+      style={{ flex: 1, backgroundColor: C.bg }}
+      contentContainerStyle={styles.scroll}
+      scrollEnabled={false}
     >
-      <style>{`
-        @import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=DM+Sans:wght@400;500&display=swap');
-        *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-        @keyframes fadeUp {
-          from { opacity: 0; transform: translateY(6px); }
-          to   { opacity: 1; transform: translateY(0);   }
-        }
-        button:hover { opacity: 0.75; }
-      `}</style>
+      <View style={[styles.container, { width: boardPx }]}>
 
-      <div
-        style={{
-          display: "flex",
-          flexDirection: "column",
-          alignItems: "center",
-          gap: 18,
-          position: "relative",
-          width: boardW,
-        }}
-      >
-        {/* ── Header ──────────────────────────────────────────── */}
-        <div style={{ width: "100%", display: "flex", justifyContent: "space-between", alignItems: "flex-end" }}>
-          <div>
-            <div
-              style={{
-                fontFamily: MONO,
-                fontSize: 9,
-                color: C.muted,
-                letterSpacing: 3,
-                textTransform: "uppercase",
-                marginBottom: 4,
-              }}
+        {/* ── Header ───────────────────────────────────────────── */}
+        <View style={styles.header}>
+          <View>
+            <Text style={[styles.label, { color: C.muted, fontFamily: MONO }]}>
+              BLOCK CHALLENGE
+            </Text>
+            <View style={styles.row}>
+              <Text style={[styles.bigNum, { color: C.text, fontFamily: MONO }]}>{turn}</Text>
+              <Text style={[styles.dimNum, { color: C.dim, fontFamily: MONO }]}>/ {T}</Text>
+            </View>
+          </View>
+          <View style={{ alignItems: "flex-end", gap: 6 }}>
+            {/* Theme toggle */}
+            <TouchableOpacity
+              onPress={toggleTheme}
+              activeOpacity={0.7}
+              style={[styles.themeBtn, { borderColor: C.border }]}
             >
-              Block Challenge
-            </div>
-            <div style={{ display: "flex", alignItems: "baseline", gap: 3 }}>
-              <span style={{ fontFamily: MONO, fontSize: 22, fontWeight: 500, color: C.text, lineHeight: 1 }}>
-                {turn}
-              </span>
-              <span style={{ fontFamily: MONO, fontSize: 11, color: C.dim }}>/ {T}</span>
-            </div>
-          </div>
-          <div style={{ textAlign: "right" }}>
-            <div
-              style={{
-                fontFamily: MONO,
-                fontSize: 9,
-                color: C.muted,
-                letterSpacing: 3,
-                textTransform: "uppercase",
-                marginBottom: 4,
-              }}
-            >
-              Lines
-            </div>
-            <div style={{ fontFamily: MONO, fontSize: 22, fontWeight: 500, color: C.text, lineHeight: 1 }}>
-              {lines}
-            </div>
-          </div>
-        </div>
+              <Text style={[styles.themeBtnText, { color: C.muted, fontFamily: MONO }]}>
+                {C.name}
+              </Text>
+            </TouchableOpacity>
+            <View style={{ alignItems: "flex-end" }}>
+              <Text style={[styles.label, { color: C.muted, fontFamily: MONO }]}>LINES</Text>
+              <Text style={[styles.bigNum, { color: C.text, fontFamily: MONO }]}>{lines}</Text>
+            </View>
+          </View>
+        </View>
 
         {/* ── Progress bar ─────────────────────────────────────── */}
-        <div style={{ width: "100%", height: 2, background: C.empty, borderRadius: 1 }}>
-          <div
-            style={{
-              height: 2,
-              width: `${(turn / T) * 100}%`,
-              background: C.fill1,
-              borderRadius: 1,
-              transition: "width 0.2s ease",
-            }}
+        <View style={[styles.progressTrack, { backgroundColor: C.empty }]}>
+          <View
+            style={[
+              styles.progressFill,
+              { width: `${(turn / T) * 100}%`, backgroundColor: C.fill1 },
+            ]}
           />
-        </div>
+        </View>
 
         {/* ── Piece queue ──────────────────────────────────────── */}
-        <div
-          style={{
-            width: "100%",
-            display: "flex",
-            alignItems: "center",
-            gap: 14,
-            height: 30,
-          }}
-        >
-          {current && (
-            <>
-              <span
-                style={{
-                  fontFamily: MONO,
-                  fontSize: 9,
-                  color: C.muted,
-                  letterSpacing: 2,
-                  textTransform: "uppercase",
-                }}
-              >
-                Now
-              </span>
-              <MiniPiece piece={current} size={14} />
-              <div style={{ flex: 1 }} />
-              <div style={{ width: 1, height: 18, background: C.border }} />
-              <span
-                style={{
-                  fontFamily: MONO,
-                  fontSize: 9,
-                  color: C.dim,
-                  letterSpacing: 2,
-                  textTransform: "uppercase",
-                }}
-              >
-                Next
-              </span>
-              {upcoming.map((p, i) => (
-                <MiniPiece key={i} piece={p} size={11} opacity={0.9 - i * 0.22} />
-              ))}
-            </>
-          )}
-        </div>
+        {current && (
+          <View style={[styles.queue, { borderColor: C.border }]}>
+            <Text style={[styles.label, { color: C.muted, fontFamily: MONO }]}>NOW</Text>
+            <MiniPiece piece={current} size={14} C={C} />
+            <View style={[styles.divider, { backgroundColor: C.border }]} />
+            <Text style={[styles.label, { color: C.dim, fontFamily: MONO }]}>NEXT</Text>
+            {upcoming.map((p, i) => (
+              <MiniPiece key={i} piece={p} size={11} opacity={0.9 - i * 0.22} C={C} />
+            ))}
+          </View>
+        )}
 
         {/* ── Board ────────────────────────────────────────────── */}
-        <div
-          style={{ background: C.board, padding: 8, borderRadius: 4, position: "relative" }}
-          onMouseLeave={() => setHover(null)}
-        >
-          <div
-            style={{
-              display: "grid",
-              gridTemplateColumns: `repeat(${S}, ${CELL}px)`,
-              gridTemplateRows: `repeat(${S}, ${CELL}px)`,
-              gap: 2,
-            }}
-          >
-            {board.map((row, r) =>
-              row.map((cell, c) => {
+        <View style={[styles.boardWrap, { backgroundColor: C.board }]}>
+          {board.map((row, r) => (
+            <View key={r} style={styles.boardRow}>
+              {row.map((cell, c) => {
                 const k         = `${r}-${c}`;
                 const isFlash   = flash.has(k);
                 const isPreview = previewSet.has(k);
                 const isInvalid = invalidSet.has(k);
+                const isSel     = selected?.r === r && selected?.c === c;
 
                 let bg = C.empty;
-                if      (isFlash)    bg = C.flash;
+                if      (isFlash)   bg = C.flash;
                 else if (cell === 1) bg = C.fill0;
                 else if (cell === 2) bg = C.fill1;
-                else if (isPreview)  bg = C.preview + "aa";
-                else if (isInvalid)  bg = C.invalid + "88";
+                else if (isPreview)  bg = C.preview + "bb";
+                else if (isInvalid)  bg = C.invalid;
 
                 return (
-                  <div
+                  <TouchableOpacity
                     key={k}
-                    style={{
-                      width: CELL,
-                      height: CELL,
-                      borderRadius: 2,
-                      background: bg,
-                      cursor: phase === "playing" ? "pointer" : "default",
-                      transition: "background 0.07s",
-                    }}
-                    onClick={() => handleClick(r, c)}
-                    onMouseEnter={() => phase === "playing" && setHover({ r, c })}
+                    activeOpacity={0.85}
+                    onPress={() => handleCellPress(r, c)}
+                    style={[
+                      styles.cell,
+                      {
+                        width: CELL,
+                        height: CELL,
+                        backgroundColor: bg,
+                        borderWidth: isSel ? 1.5 : 0,
+                        borderColor: isSel ? C.text : "transparent",
+                      },
+                    ]}
                   />
                 );
-              })
-            )}
-          </div>
-        </div>
+              })}
+            </View>
+          ))}
+        </View>
 
         {/* ── History bar ──────────────────────────────────────── */}
-        <HistoryBar history={history} />
+        <HistoryBar history={history} C={C} />
 
         {/* ── Hint ─────────────────────────────────────────────── */}
-        <div
-          style={{
-            fontFamily: MONO,
-            fontSize: 9,
-            color: C.dim,
-            letterSpacing: 2,
-            textTransform: "uppercase",
-          }}
-        >
-          {phase === "playing" ? `Place piece · ${T - turn} left` : ""}
-        </div>
+        <Text style={[styles.hint, { color: C.dim, fontFamily: MONO }]}>
+          {phase === "playing"
+            ? selected
+              ? "TAP SAME CELL TO PLACE"
+              : `TAP CELL TO PREVIEW · ${T - turn} LEFT`
+            : ""}
+        </Text>
 
         {/* ── End-screen overlay ───────────────────────────────── */}
         {phase === "ended" && (
-          <div
-            style={{
-              position: "absolute",
-              inset: 0,
-              background: "rgba(8,14,8,0.96)",
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              borderRadius: 4,
-              animation: "fadeUp 0.25s ease",
-              zIndex: 10,
-            }}
-          >
-            <div style={{ textAlign: "center" }}>
-              <div
-                style={{
-                  fontFamily: MONO,
-                  fontSize: 9,
-                  color: C.muted,
-                  letterSpacing: 4,
-                  textTransform: "uppercase",
-                  marginBottom: 20,
-                }}
-              >
-                Round complete
-              </div>
-              <div
-                style={{
-                  fontFamily: MONO,
-                  fontSize: 72,
-                  fontWeight: 500,
-                  color: C.text,
-                  lineHeight: 1,
-                  marginBottom: 2,
-                }}
-              >
-                {lines}
-              </div>
-              <div
-                style={{
-                  fontFamily: MONO,
-                  fontSize: 9,
-                  color: C.muted,
-                  letterSpacing: 3,
-                  textTransform: "uppercase",
-                  marginBottom: 28,
-                }}
-              >
-                Lines cleared
-              </div>
-              <HistoryBar history={history} large />
-              <button
-                onClick={restart}
-                style={{
-                  display: "block",
-                  margin: "28px auto 0",
-                  fontFamily: MONO,
-                  fontSize: 9,
-                  letterSpacing: 3,
-                  textTransform: "uppercase",
-                  background: "transparent",
-                  border: `1px solid ${C.border}`,
-                  color: C.muted,
-                  padding: "10px 28px",
-                  borderRadius: 2,
-                  cursor: "pointer",
-                }}
-              >
-                Try again
-              </button>
-            </div>
-          </div>
+          <View style={[styles.overlay, { backgroundColor: C.bg + "f5" }]}>
+            <Text style={[styles.label, { color: C.muted, fontFamily: MONO, letterSpacing: 4, marginBottom: 20 }]}>
+              ROUND COMPLETE
+            </Text>
+            <Text style={[styles.finalScore, { color: C.text, fontFamily: MONO }]}>{lines}</Text>
+            <Text style={[styles.label, { color: C.muted, fontFamily: MONO, letterSpacing: 3, marginBottom: 28 }]}>
+              LINES CLEARED
+            </Text>
+            <HistoryBar history={history} large C={C} />
+            <TouchableOpacity
+              onPress={restart}
+              activeOpacity={0.7}
+              style={[styles.retryBtn, { borderColor: C.border }]}
+            >
+              <Text style={[styles.retryText, { color: C.muted, fontFamily: MONO }]}>
+                TRY AGAIN
+              </Text>
+            </TouchableOpacity>
+          </View>
         )}
-      </div>
-    </div>
+
+      </View>
+    </ScrollView>
   );
 }
+
+// ─── Styles ───────────────────────────────────────────────────────────────────
+const styles = StyleSheet.create({
+  scroll: {
+    flexGrow: 1,
+    alignItems: "center",
+    justifyContent: "center",
+    paddingVertical: 24,
+    paddingHorizontal: 16,
+  },
+  container: {
+    alignItems: "center",
+    gap: 16,
+    position: "relative",
+  },
+  header: {
+    width: "100%",
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "flex-end",
+  },
+  row: {
+    flexDirection: "row",
+    alignItems: "baseline",
+    gap: 3,
+  },
+  label: {
+    fontSize: 9,
+    letterSpacing: 3,
+    marginBottom: 4,
+  },
+  bigNum: {
+    fontSize: 22,
+    fontWeight: "500",
+    lineHeight: 26,
+  },
+  dimNum: {
+    fontSize: 11,
+  },
+  themeBtn: {
+    borderWidth: 1,
+    borderRadius: 2,
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+  },
+  themeBtnText: {
+    fontSize: 8,
+    letterSpacing: 2,
+  },
+  progressTrack: {
+    width: "100%",
+    height: 2,
+    borderRadius: 1,
+    overflow: "hidden",
+  },
+  progressFill: {
+    height: 2,
+    borderRadius: 1,
+  },
+  queue: {
+    width: "100%",
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+    height: 34,
+    borderBottomWidth: 1,
+    paddingBottom: 8,
+  },
+  divider: {
+    width: 1,
+    height: 18,
+    marginHorizontal: 2,
+  },
+  boardWrap: {
+    padding: 8,
+    borderRadius: 4,
+    gap: 2,
+  },
+  boardRow: {
+    flexDirection: "row",
+    gap: 2,
+  },
+  cell: {
+    borderRadius: 2,
+  },
+  hint: {
+    fontSize: 9,
+    letterSpacing: 2,
+    marginTop: 4,
+  },
+  overlay: {
+    ...StyleSheet.absoluteFillObject,
+    alignItems: "center",
+    justifyContent: "center",
+    borderRadius: 4,
+    zIndex: 10,
+  },
+  finalScore: {
+    fontSize: 72,
+    fontWeight: "500",
+    lineHeight: 80,
+    marginBottom: 4,
+  },
+  retryBtn: {
+    marginTop: 28,
+    borderWidth: 1,
+    borderRadius: 2,
+    paddingHorizontal: 28,
+    paddingVertical: 10,
+  },
+  retryText: {
+    fontSize: 9,
+    letterSpacing: 3,
+  },
+});
